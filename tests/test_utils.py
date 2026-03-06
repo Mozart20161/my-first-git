@@ -1,0 +1,25 @@
+import unittest
+
+from football_bot.utils import parse_int_arg, parse_float_arg, validate_date, validate_time
+
+
+class UtilsTests(unittest.TestCase):
+    def test_parse_int_arg(self):
+        self.assertEqual(parse_int_arg('/setlimit 12'), 12)
+        self.assertIsNone(parse_int_arg('/setlimit -1'))
+        self.assertEqual(parse_int_arg('/bank -10', allow_negative=True), -10)
+
+    def test_parse_float_arg(self):
+        self.assertEqual(parse_float_arg('/setrating Ivan 7.3'), ('Ivan', 7.3))
+        self.assertEqual(parse_float_arg('/setrating Ivan 7,3'), ('Ivan', 7.3))
+        self.assertIsNone(parse_float_arg('/setrating Ivan abc'))
+
+    def test_date_time_validation(self):
+        self.assertTrue(validate_date('10.02'))
+        self.assertFalse(validate_date('2024-02-10'))
+        self.assertTrue(validate_time('22:00'))
+        self.assertFalse(validate_time('25:10'))
+
+
+if __name__ == '__main__':
+    unittest.main()
