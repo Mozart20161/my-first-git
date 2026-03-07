@@ -29,7 +29,7 @@ def get_main_text(state: BotState, cfg: Config) -> str:
         "⚽️ СБОР НА ФУТБОЛ\n"
         f"📅 {state.match_data['date']} в {state.match_data['time']}\n"
         f"📌 Лимит: {state.match_data['limit']}\n"
-        f"💰 С носа: {price} ₽ | В банк: +{cfg.bank_fee} ₽\n"
+        f"💰 С носа: {price} ₽\n"
         f"🏦 В БАНКЕ: {state.bank_total} ₽\n"
         "💸 Оплата: +79537904028\n"
         "---------------------------\n"
@@ -107,6 +107,38 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             save_state(cfg.data_file, state)
         await refresh_message()
         await cb.answer("Оплата отмечена")
+
+
+
+    @dp.message(Command("help"))
+    async def help_cmd(message: types.Message):
+        lines = [
+            "Доступные команды:",
+            "/help — показать это сообщение",
+            "/players — список записавшихся",
+            "/lineup — сформировать команды по рейтингам",
+        ]
+        if admin(message):
+            lines.extend([
+                "/setdate <дд.мм>",
+                "/settime <чч:мм>",
+                "/setlimit <число>",
+                "/bank <сумма>",
+                "/setrating <имя> <рейтинг>",
+            ])
+        await message.answer("\n".join(lines))
+
+    @dp.message(Command("players"))
+    async def players(message: types.Message):
+        if not state.players:
+            await message.answer("Пока никто не записался")
+            return
+        text = ["Игроки в списке:"]
+        for i, p in enumerate(state.players, 1):
+            paid = "✅" if p.get("paid") else "❌"
+            rating = state.ratings.get(p["name"], 5.0)
+            text.append(f"{i}. {p['name']} | рейтинг: {rating:.1f} | оплата: {paid}")
+        await message.answer("\n".join(text))
 
     @dp.message(Command("setdate"))
     async def setdate(message: types.Message):
