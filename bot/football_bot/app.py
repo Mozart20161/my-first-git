@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .config import Config
@@ -28,8 +29,9 @@ def get_main_text(state: BotState, cfg: Config) -> str:
         "⚽️ СБОР НА ФУТБОЛ\n"
         f"📅 {state.match_data['date']} в {state.match_data['time']}\n"
         f"📌 Лимит: {state.match_data['limit']}\n"
-        f"💰 С носа: {price} ₽ | В банк: +{cfg.bank_fee} ₽\n"
+        f"💰 С носа: {price} ₽\n"
         f"🏦 В БАНКЕ: {state.bank_total} ₽\n"
+        "💸 Оплата: +79537904028\n"
         "---------------------------\n"
     )
     for i, p in enumerate(state.players, 1):
@@ -55,6 +57,9 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             try:
                 await bot.edit_message_text(text=text, chat_id=cfg.chat_id, message_id=msg_id, reply_markup=build_kb())
                 return
+            except TelegramBadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    return
             except Exception:
                 pass
         msg = await safe_send(cfg.chat_id, text, reply_markup=build_kb(), message_thread_id=cfg.thread_payments)
@@ -94,12 +99,46 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             if not player:
                 await cb.answer("Сначала запишись", show_alert=True)
                 return
-            if not player.get("paid"):
-                player["paid"] = True
-                state.bank_total += cfg.bank_fee
-                save_state(cfg.data_file, state)
+            if player.get("paid"):
+                await cb.answer("Оплата уже отмечена", show_alert=True)
+                return
+            player["paid"] = True
+            state.bank_total += cfg.bank_fee
+            save_state(cfg.data_file, state)
         await refresh_message()
         await cb.answer("Оплата отмечена")
+
+
+
+    @dp.message(Command("help"))
+    async def help_cmd(message: types.Message):
+        lines = [
+            "Доступные команды:",
+            "/help — показать это сообщение",
+            "/players — список записавшихся",
+            "/lineup — сформировать команды по рейтингам",
+        ]
+        if admin(message):
+            lines.extend([
+                "/setdate <дд.мм>",
+                "/settime <чч:мм>",
+                "/setlimit <число>",
+                "/bank <сумма>",
+                "/setrating <имя> <рейтинг>",
+            ])
+        await message.answer("\n".join(lines))
+
+    @dp.message(Command("players"))
+    async def players(message: types.Message):
+        if not state.players:
+            await message.answer("Пока никто не записался")
+            return
+        text = ["Игроки в списке:"]
+        for i, p in enumerate(state.players, 1):
+            paid = "✅" if p.get("paid") else "❌"
+            rating = state.ratings.get(p["name"], 5.0)
+            text.append(f"{i}. {p['name']} | рейтинг: {rating:.1f} | оплата: {paid}")
+        await message.answer("\n".join(text))
 
     @dp.message(Command("setdate"))
     async def setdate(message: types.Message):
