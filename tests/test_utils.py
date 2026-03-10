@@ -1,6 +1,15 @@
 import unittest
 
-from football_bot.utils import balance_two_teams, format_lineups, parse_float_arg, parse_int_arg, validate_date, validate_time
+from football_bot.utils import (
+    balance_two_teams,
+    format_lineups,
+    get_three_team_rating_deltas,
+    get_two_team_rating_delta,
+    parse_float_arg,
+    parse_int_arg,
+    validate_date,
+    validate_time,
+)
 
 
 class UtilsTests(unittest.TestCase):
@@ -22,6 +31,19 @@ class UtilsTests(unittest.TestCase):
         self.assertIn("B", teams["белые"])
         self.assertEqual(len(teams["красные"]), 4)
         self.assertEqual(len(teams["белые"]), 4)
+
+
+    def test_two_team_delta(self):
+        self.assertEqual(get_two_team_rating_delta(0), 0.0)
+        self.assertEqual(get_two_team_rating_delta(1), 0.035)
+        self.assertEqual(get_two_team_rating_delta(2), 0.07)
+        self.assertEqual(get_two_team_rating_delta(5), 0.1)
+
+    def test_three_team_deltas(self):
+        deltas = get_three_team_rating_deltas({"красные": 6, "белые": 3, "зеленые": 0})
+        self.assertGreater(deltas["красные"], 0)
+        self.assertLess(deltas["зеленые"], 0)
+        self.assertAlmostEqual(sum(deltas.values()), 0.0, places=2)
 
     def test_format_lineups(self):
         text = format_lineups(
