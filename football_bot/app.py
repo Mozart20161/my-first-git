@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .config import Config
 from .state import BotState
 from .storage import save_state
-from .utils import parse_float_arg, parse_int_arg, validate_date, validate_time
+from .utils import format_lineups, parse_float_arg, parse_int_arg, validate_date, validate_time
 
 
 def build_kb() -> types.InlineKeyboardMarkup:
@@ -333,7 +333,86 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             state.last_teams = {"красные": t1, "белые": t2}
         async with state.lock:
             save_state(cfg.data_file, state)
-        await safe_send(cfg.chat_id, "Составы готовы", message_thread_id=cfg.thread_teams)
+        lineup_text = format_lineups(state.last_teams)
+        await safe_send(cfg.chat_id, f"Составы готовы\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
+
+    @dp.message(Command("tour_start"))
+    async def tour_start(message: types.Message):
+        if not admin(message):
+            return
+        async with state.lock:
+            teams = state.last_teams or {}
+            names = [n for n in ("красные", "белые", "зеленые") if isinstance(teams.get(n), list)]
+            if len(names) != 3:
+                await message.answer("Сначала сформируй 3 команды через /lineup")
+                return
+            state.tournament_data = {
+                "active": True,
+                "teams": {n: {"points": 0, "wins": 0, "draws": 0, "losses": 0, "matches": 0} for n in names},
+                "current_pair": [names[0], names[1]],
+                "waiting": names[2],
+                "streak": {names[0]: 1, names[1]: 1, names[2]: 0},
+                "message_id": None,
+            }
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+
+    @dp.callback_query(F.data.startswith("tour_win:"))
+    async def tour_win(cb: types.CallbackQuery):
+        if cb.from_user.id != cfg.admin_id:
+            await cb.answer("Только админ", show_alert=True)
+            return
+        winner = cb.data.split(":", 1)[1]
+        async with state.lock:
+            if not _tour_active():
+                await cb.answer("Турнир не запущен", show_alert=True)
+                return
+            if winner not in state.tournament_data.get("current_pair", []):
+                await cb.answer("Победитель должен быть из текущей пары", show_alert=True)
+                return
+            _apply_result(winner)
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await cb.answer("Результат записан")
+
+    @dp.callback_query(F.data == "tour_draw")
+    async def tour_draw(cb: types.CallbackQuery):
+        if cb.from_user.id != cfg.admin_id:
+            await cb.answer("Только админ", show_alert=True)
+            return
+        async with state.lock:
+            if not _tour_active():
+                await cb.answer("Турнир не запущен", show_alert=True)
+                return
+            _apply_result(None)
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await cb.answer("Ничья записана")
+
+    @dp.message(Command("table"))
+    async def table(message: types.Message):
+        await message.answer(_tour_text())
+
+    @dp.message(Command("tour_end"))
+    async def tour_end(message: types.Message):
+        if not admin(message):
+            return
+        async with state.lock:
+            if not _tour_active():
+                await message.answer("Турнир не запущен")
+                return
+            teams = state.tournament_data["teams"]
+            avg = sum(v["points"] for v in teams.values()) / max(len(teams), 1)
+            rosters = state.last_teams or {}
+            for team_name, row in teams.items():
+                delta = 0.2 * (row["points"] - avg)
+                for player_name in rosters.get(team_name, []):
+                    old = state.ratings.get(player_name, 5.0)
+                    state.ratings[player_name] = min(10.0, max(1.0, round(old + delta, 2)))
+            state.tournament_data["active"] = False
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await message.answer("Турнир завершен, рейтинги обновлены")
 
     @dp.message(Command("tour_start"))
     async def tour_start(message: types.Message):
