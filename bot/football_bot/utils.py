@@ -15,11 +15,15 @@ def parse_int_arg(text: str | None, allow_negative: bool = False) -> int | None:
 
 
 def parse_float_arg(text: str | None) -> tuple[str, float] | None:
-    parts = (text or "").split(maxsplit=2)
+    parts = (text or "").split()
     if len(parts) < 3:
         return None
+    raw_name = " ".join(parts[1:-1]).strip()
+    raw_rating = parts[-1].strip()
+    if not raw_name:
+        return None
     try:
-        return parts[1].strip(), float(parts[2].replace(",", "."))
+        return raw_name, float(raw_rating.replace(",", "."))
     except ValueError:
         return None
 
