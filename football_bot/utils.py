@@ -133,3 +133,71 @@ def format_lineups(
         diff = abs(totals[0] - totals[1])
         lines.append(f"Разница рейтингов: {diff:.1f}")
     return "\n\n".join(lines)
+
+
+
+def init_three_team_tournament(team_names: list[str]) -> dict:
+    if len(team_names) != 3:
+        raise ValueError("Турнир требует ровно 3 команды")
+    table = {team: {"gp": 0, "w": 0, "d": 0, "l": 0, "pts": 0} for team in team_names}
+    current_pair = [team_names[0], team_names[1]]
+    resting = team_names[2]
+    streak = {team_names[0]: 1, team_names[1]: 1, team_names[2]: 0}
+    return {
+        "active": True,
+        "teams": team_names,
+        "table": table,
+        "current_pair": current_pair,
+        "resting": resting,
+        "streak": streak,
+        "rounds": [],
+        "message_id": None,
+    }
+
+
+def apply_three_team_round(tournament: dict, result: str) -> dict:
+    team1, team2 = tournament["current_pair"]
+    resting = tournament["resting"]
+    table = tournament["table"]
+
+    table[team1]["gp"] += 1
+    table[team2]["gp"] += 1
+
+    if result == "team1":
+        table[team1]["w"] += 1
+        table[team1]["pts"] += 3
+        table[team2]["l"] += 1
+        next_pair = [team1, resting]
+        next_rest = team2
+    elif result == "team2":
+        table[team2]["w"] += 1
+        table[team2]["pts"] += 3
+        table[team1]["l"] += 1
+        next_pair = [team2, resting]
+        next_rest = team1
+    elif result == "draw":
+        table[team1]["d"] += 1
+        table[team2]["d"] += 1
+        table[team1]["pts"] += 1
+        table[team2]["pts"] += 1
+
+        streak = tournament["streak"]
+        if streak.get(team1, 0) >= 2 and streak.get(team2, 0) < 2:
+            next_pair = [team2, resting]
+            next_rest = team1
+        elif streak.get(team2, 0) >= 2 and streak.get(team1, 0) < 2:
+            next_pair = [team1, resting]
+            next_rest = team2
+        else:
+            next_pair = [team2, resting]
+            next_rest = team1
+    else:
+        raise ValueError("result must be one of: team1, team2, draw")
+
+    tournament["rounds"].append({"pair": [team1, team2], "result": result})
+    tournament["current_pair"] = next_pair
+    tournament["resting"] = next_rest
+    for team in tournament["teams"]:
+        tournament["streak"][team] = tournament["streak"].get(team, 0) + 1 if team in next_pair else 0
+
+    return tournament
