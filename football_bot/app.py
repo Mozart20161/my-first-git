@@ -9,7 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .config import Config
 from .state import BotState
 from .storage import save_state
-from .utils import parse_float_arg, parse_int_arg, validate_date, validate_time
+from .utils import balance_two_teams, format_lineups, parse_float_arg, parse_int_arg, validate_date, validate_time
 
 
 def build_kb() -> types.InlineKeyboardMarkup:
@@ -64,6 +64,10 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
 
     def admin(message: types.Message) -> bool:
         return message.from_user.id == cfg.admin_id
+
+    def next_manual_player_id() -> int:
+        manual_ids = [p["id"] for p in state.players if isinstance(p.get("id"), int) and p["id"] < 0]
+        return (min(manual_ids) - 1) if manual_ids else -1
 
     @dp.callback_query(F.data == "join")
     async def join(cb: types.CallbackQuery):
@@ -167,6 +171,96 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             save_state(cfg.data_file, state)
         await message.answer("OK")
 
+    @dp.message(Command("addplayer"))
+    async def addplayer(message: types.Message):
+        if not admin(message):
+            return
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer("Использование: /addplayer <имя игрока>")
+            return
+        name = parts[1].strip()
+
+        async with state.lock:
+            if any(p["name"].lower() == name.lower() for p in state.players):
+                await message.answer("Игрок уже в списке")
+                return
+            if len(state.players) >= state.match_data["limit"]:
+                await message.answer("Лимит игроков уже достигнут")
+                return
+            state.players.append({"id": next_manual_player_id(), "name": name, "paid": False, "guest": True})
+            save_state(cfg.data_file, state)
+
+        await refresh_message()
+        await message.answer(f"Добавил игрока: {name}")
+
+    @dp.message(Command("setcore"))
+    async def setcore(message: types.Message):
+        if not admin(message):
+            return
+        payload = (message.text or "").split(maxsplit=1)
+        if len(payload) < 2 or "|" not in payload[1]:
+            await message.answer("Использование: /setcore <красные|белые> | <игрок1, игрок2>")
+            return
+        team_raw, players_raw = payload[1].split("|", maxsplit=1)
+        team_name = team_raw.strip().lower()
+        if team_name not in ("красные", "белые"):
+            await message.answer("Можно фиксировать только команды: красные или белые")
+            return
+        players = [name.strip() for name in players_raw.split(",") if name.strip()]
+        if not players:
+            await message.answer("Укажи хотя бы одного игрока")
+            return
+
+        async with state.lock:
+            pinned = state.tournament_data.setdefault("pinned_teams", {})
+            pinned[team_name] = players
+            save_state(cfg.data_file, state)
+        await message.answer(f"Ядро для {team_name} сохранено")
+
+    @dp.message(Command("clearcore"))
+    async def clearcore(message: types.Message):
+        if not admin(message):
+            return
+        async with state.lock:
+            state.tournament_data.pop("pinned_teams", None)
+            save_state(cfg.data_file, state)
+        await message.answer("Фиксация ядра очищена")
+
+    @dp.message(Command("swap"))
+    async def swap(message: types.Message):
+        if not admin(message):
+            return
+        payload = (message.text or "").split(maxsplit=1)
+        if len(payload) < 2 or "|" not in payload[1]:
+            await message.answer("Использование: /swap <игрок1> | <игрок2>")
+            return
+        p1, p2 = (part.strip() for part in payload[1].split("|", maxsplit=1))
+        if not p1 or not p2:
+            await message.answer("Использование: /swap <игрок1> | <игрок2>")
+            return
+        if not state.last_teams:
+            await message.answer("Сначала сформируй составы через /lineup")
+            return
+
+        async with state.lock:
+            team1 = next((team for team, players in state.last_teams.items() if p1 in players), None)
+            team2 = next((team for team, players in state.last_teams.items() if p2 in players), None)
+            if not team1 or not team2:
+                await message.answer("Один из игроков не найден в текущих составах")
+                return
+            if team1 == team2:
+                await message.answer("Игроки уже в одной команде")
+                return
+
+            i1 = state.last_teams[team1].index(p1)
+            i2 = state.last_teams[team2].index(p2)
+            state.last_teams[team1][i1], state.last_teams[team2][i2] = state.last_teams[team2][i2], state.last_teams[team1][i1]
+            save_state(cfg.data_file, state)
+
+        lineup_text = format_lineups(state.last_teams, state.ratings)
+        await safe_send(cfg.chat_id, f"Составы обновлены\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
+
     @dp.message(Command("lineup"))
     async def lineup(message: types.Message):
         total = len(state.players)
@@ -186,13 +280,12 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
                 sums[target] += state.ratings.get(player["name"], 5.0)
             state.last_teams = {"красные": teams[0], "белые": teams[1], "зеленые": teams[2]}
         else:
-            t1, t2 = [], []
-            for i, name in enumerate(names):
-                (t1 if i % 4 in (0, 3) else t2).append(name)
-            state.last_teams = {"красные": t1, "белые": t2}
+            pinned = state.tournament_data.get("pinned_teams") if isinstance(state.tournament_data.get("pinned_teams"), dict) else None
+            state.last_teams = balance_two_teams(names, state.ratings, pinned)
         async with state.lock:
             save_state(cfg.data_file, state)
-        await safe_send(cfg.chat_id, "Составы готовы", message_thread_id=cfg.thread_teams)
+        lineup_text = format_lineups(state.last_teams, state.ratings)
+        await safe_send(cfg.chat_id, f"Составы готовы\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
 
     async def create_next_match():
         async with state.lock:
