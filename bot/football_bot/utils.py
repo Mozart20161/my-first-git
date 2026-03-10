@@ -40,10 +40,16 @@ def validate_time(value: str) -> bool:
         return False
 
 
-def format_lineups(teams: dict[str, list[str]]) -> str:
+def format_lineups(
+    teams: dict[str, list[str]],
+    ratings: dict[str, float] | None = None,
+    default_rating: float = 5.0,
+) -> str:
     lines: list[str] = []
+    ratings = ratings or {}
     for team_name, players in teams.items():
         title = team_name.capitalize()
+        total_rating = sum(ratings.get(name, default_rating) for name in players)
         player_list = "\n".join(f"- {name}" for name in players) if players else "- —"
-        lines.append(f"{title}:\n{player_list}")
+        lines.append(f"{title} (рейтинг: {total_rating:.1f}):\n{player_list}")
     return "\n\n".join(lines)

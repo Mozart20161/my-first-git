@@ -16,10 +16,13 @@ class UtilsTests(unittest.TestCase):
 
 
     def test_format_lineups(self):
-        text = format_lineups({"красные": ["Ivan", "Petr"], "белые": ["Oleg"]})
-        self.assertIn("Красные:", text)
+        text = format_lineups(
+            {"красные": ["Ivan", "Petr"], "белые": ["Oleg"]},
+            {"Ivan": 7.0, "Petr": 6.5, "Oleg": 8.0},
+        )
+        self.assertIn("Красные (рейтинг: 13.5):", text)
         self.assertIn("- Ivan", text)
-        self.assertIn("Белые:", text)
+        self.assertIn("Белые (рейтинг: 8.0):", text)
 
     def test_date_time_validation(self):
         self.assertTrue(validate_date('10.02'))

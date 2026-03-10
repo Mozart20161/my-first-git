@@ -192,7 +192,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             state.last_teams = {"красные": t1, "белые": t2}
         async with state.lock:
             save_state(cfg.data_file, state)
-        lineup_text = format_lineups(state.last_teams)
+        lineup_text = format_lineups(state.last_teams, state.ratings)
         await safe_send(cfg.chat_id, f"Составы готовы\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
 
     async def create_next_match():
