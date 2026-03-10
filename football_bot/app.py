@@ -70,104 +70,9 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
     def admin(message: types.Message) -> bool:
         return message.from_user.id == cfg.admin_id
 
-    def _tour_active() -> bool:
-        return bool(state.tournament_data.get("active"))
-
-    def _tour_text() -> str:
-        tour = state.tournament_data
-        if not tour or not tour.get("active"):
-            return "🏆 Турнир не запущен"
-        teams = tour["teams"]
-        current = tour["current_pair"]
-        waiting = tour["waiting"]
-        lines = [
-            "🏆 ТУРНИР 3х3 (winner stays)",
-            f"Сейчас: {current[0]} vs {current[1]} | ждет: {waiting}",
-            "",
-            "Таблица:",
-        ]
-        sorted_rows = sorted(teams.items(), key=lambda x: (x[1]["points"], x[1]["wins"]), reverse=True)
-        for idx, (name, row) in enumerate(sorted_rows, 1):
-            lines.append(f"{idx}. {name}: {row['points']} очк (В:{row['wins']} Н:{row['draws']} П:{row['losses']})")
-        return "\n".join(lines)
-
-    def _tour_kb() -> types.InlineKeyboardMarkup:
-        tour = state.tournament_data
-        current = tour["current_pair"]
-        b = InlineKeyboardBuilder()
-        b.button(text=f"✅ Победа {current[0]}", callback_data=f"tour_win:{current[0]}")
-        b.button(text="🤝 Ничья", callback_data="tour_draw")
-        b.button(text=f"✅ Победа {current[1]}", callback_data=f"tour_win:{current[1]}")
-        b.adjust(1)
-        return b.as_markup()
-
-    async def _render_tour_message() -> None:
-        tour = state.tournament_data
-        text = _tour_text()
-        msg_id = tour.get("message_id")
-        if msg_id:
-            try:
-                await bot.edit_message_text(
-                    text=text,
-                    chat_id=cfg.chat_id,
-                    message_id=msg_id,
-                    reply_markup=_tour_kb() if _tour_active() else None,
-                )
-                return
-            except TelegramBadRequest as e:
-                if "message is not modified" in str(e).lower():
-                    return
-            except Exception:
-                pass
-        msg = await safe_send(
-            cfg.chat_id,
-            text,
-            reply_markup=_tour_kb() if _tour_active() else None,
-            message_thread_id=cfg.thread_teams,
-        )
-        if msg:
-            tour["message_id"] = msg.message_id
-
-    def _apply_result(winner: str | None) -> None:
-        tour = state.tournament_data
-        t1, t2 = tour["current_pair"]
-        waiting = tour["waiting"]
-        teams = tour["teams"]
-        streak = tour["streak"]
-
-        if winner is None:
-            teams[t1]["points"] += 1
-            teams[t2]["points"] += 1
-            teams[t1]["draws"] += 1
-            teams[t2]["draws"] += 1
-            if streak.get(t1, 0) >= 2 and streak.get(t2, 0) < 2:
-                sit = t1
-            elif streak.get(t2, 0) >= 2 and streak.get(t1, 0) < 2:
-                sit = t2
-            else:
-                sit = t1
-            stay = t2 if sit == t1 else t1
-            next_pair = [stay, waiting]
-            next_waiting = sit
-        else:
-            loser = t2 if winner == t1 else t1
-            teams[winner]["points"] += 3
-            teams[winner]["wins"] += 1
-            teams[loser]["losses"] += 1
-            next_pair = [winner, waiting]
-            next_waiting = loser
-
-        teams[t1]["matches"] += 1
-        teams[t2]["matches"] += 1
-        new_streak = {}
-        for name in teams.keys():
-            if name in next_pair:
-                new_streak[name] = streak.get(name, 0) + 1 if name in (t1, t2) else 1
-            else:
-                new_streak[name] = 0
-        tour["current_pair"] = next_pair
-        tour["waiting"] = next_waiting
-        tour["streak"] = new_streak
+    def next_manual_player_id() -> int:
+        manual_ids = [p["id"] for p in state.players if isinstance(p.get("id"), int) and p["id"] < 0]
+        return (min(manual_ids) - 1) if manual_ids else -1
 
     @dp.callback_query(F.data == "join")
     async def join(cb: types.CallbackQuery):
@@ -307,6 +212,29 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             state.ratings[name] = value
             save_state(cfg.data_file, state)
         await message.answer("OK")
+
+    @dp.message(Command("addplayer"))
+    async def addplayer(message: types.Message):
+        if not admin(message):
+            return
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer("Использование: /addplayer <имя игрока>")
+            return
+        name = parts[1].strip()
+
+        async with state.lock:
+            if any(p["name"].lower() == name.lower() for p in state.players):
+                await message.answer("Игрок уже в списке")
+                return
+            if len(state.players) >= state.match_data["limit"]:
+                await message.answer("Лимит игроков уже достигнут")
+                return
+            state.players.append({"id": next_manual_player_id(), "name": name, "paid": False, "guest": True})
+            save_state(cfg.data_file, state)
+
+        await refresh_message()
+        await message.answer(f"Добавил игрока: {name}")
 
     @dp.message(Command("setcore"))
     async def setcore(message: types.Message):
