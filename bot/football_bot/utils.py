@@ -40,6 +40,39 @@ def validate_time(value: str) -> bool:
         return False
 
 
+def clamp_rating(value: float, min_rating: float = 3.0, max_rating: float = 9.5) -> float:
+    return max(min_rating, min(max_rating, value))
+
+
+def get_two_team_rating_delta(score_diff: int, k: float = 0.1) -> float:
+    if score_diff <= 0:
+        return 0.0
+    if score_diff == 1:
+        return round(k * 0.35, 3)
+    if score_diff == 2:
+        return round(k * 0.7, 3)
+    return round(k, 3)
+
+
+def get_three_team_rating_deltas(points: dict[str, int], k: float = 0.12, max_delta: float = 0.2) -> dict[str, float]:
+    if not points:
+        return {}
+    avg = sum(points.values()) / len(points)
+    spread = max(points.values()) - min(points.values())
+    spread_factor = 1.0 if spread >= 4 else (0.7 if spread >= 2 else 0.4)
+
+    deltas: dict[str, float] = {}
+    for team, value in points.items():
+        normalized = value - avg
+        delta = normalized * k * spread_factor
+        if delta > max_delta:
+            delta = max_delta
+        if delta < -max_delta:
+            delta = -max_delta
+        deltas[team] = round(delta, 3)
+    return deltas
+
+
 def balance_two_teams(
     names: list[str],
     ratings: dict[str, float] | None = None,
