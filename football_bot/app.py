@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from .config import Config
 from .state import BotState
 from .storage import save_state
-from .utils import parse_float_arg, parse_int_arg, validate_date, validate_time
+from .utils import format_lineups, parse_float_arg, parse_int_arg, validate_date, validate_time
 
 
 def build_kb() -> types.InlineKeyboardMarkup:
@@ -336,7 +336,8 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             state.last_teams = {"красные": t1, "белые": t2}
         async with state.lock:
             save_state(cfg.data_file, state)
-        await safe_send(cfg.chat_id, "Составы готовы", message_thread_id=cfg.thread_teams)
+        lineup_text = format_lineups(state.last_teams)
+        await safe_send(cfg.chat_id, f"Составы готовы\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
 
     @dp.message(Command("tour_start"))
     async def tour_start(message: types.Message):
