@@ -114,17 +114,19 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
         return "\n".join(lines)
 
     def render_tournament_text(tournament: dict) -> str:
-        lines = ["🏆 Турнир 3х3 (очки)"]
+        lines = ["🏆 Турнир 3 команды (по очкам)"]
         current = tournament.get("current_pair", [])
         resting = tournament.get("resting")
         if len(current) == 2 and resting:
             lines.append(f"Сейчас играют: {current[0].capitalize()} vs {current[1].capitalize()}")
             lines.append(f"Отдыхает: {resting.capitalize()}")
-        lines.append("\nТаблица:")
+
+        icons = {"красные": "🔴", "белые": "⚪", "зеленые": "🟢"}
+        short = {"красные": "Кр", "белые": "Бе", "зеленые": "Зе"}
         for team in tournament.get("teams", []):
             row = tournament["table"][team]
             lines.append(
-                f"{team.capitalize()}: И {row['gp']} | В {row['w']} | Н {row['d']} | П {row['l']} | О {row['pts']}"
+                f"{icons.get(team, '⚽')} {short.get(team, team[:2].capitalize())}  О:{row['pts']}  И:{row['gp']} В:{row['w']} Н:{row['d']} П:{row['l']}"
             )
         return "\n".join(lines)
 
