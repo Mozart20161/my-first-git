@@ -65,6 +65,10 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
     def admin(message: types.Message) -> bool:
         return message.from_user.id == cfg.admin_id
 
+    def next_manual_player_id() -> int:
+        manual_ids = [p["id"] for p in state.players if isinstance(p.get("id"), int) and p["id"] < 0]
+        return (min(manual_ids) - 1) if manual_ids else -1
+
     @dp.callback_query(F.data == "join")
     async def join(cb: types.CallbackQuery):
         async with state.lock:
@@ -166,6 +170,29 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             state.ratings[name] = value
             save_state(cfg.data_file, state)
         await message.answer("OK")
+
+    @dp.message(Command("addplayer"))
+    async def addplayer(message: types.Message):
+        if not admin(message):
+            return
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await message.answer("Использование: /addplayer <имя игрока>")
+            return
+        name = parts[1].strip()
+
+        async with state.lock:
+            if any(p["name"].lower() == name.lower() for p in state.players):
+                await message.answer("Игрок уже в списке")
+                return
+            if len(state.players) >= state.match_data["limit"]:
+                await message.answer("Лимит игроков уже достигнут")
+                return
+            state.players.append({"id": next_manual_player_id(), "name": name, "paid": False, "guest": True})
+            save_state(cfg.data_file, state)
+
+        await refresh_message()
+        await message.answer(f"Добавил игрока: {name}")
 
     @dp.message(Command("setcore"))
     async def setcore(message: types.Message):
