@@ -105,8 +105,8 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             "/swap <игрок1> | <игрок2>",
             "/result <счет_красные:счет_белые>",
             "/tournament <очки_красные> <очки_белые> <очки_зеленые>",
-            "/tourstart — запустить турнир по кнопкам (3 команды)",
-            "/tourend — завершить турнир и пересчитать рейтинги",
+            "/tourstart (/tour_start) — запустить турнир по кнопкам (3 команды)",
+            "/tourend (/tour_end) — завершить турнир и пересчитать рейтинги",
         ]
         lines = ["Команды:", *user_commands]
         if is_admin:
@@ -388,7 +388,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
         changes_text = ", ".join(f"{team}: {delta:+.2f}" for team, delta in deltas.items())
         await message.answer(f"Турнирные рейтинги обновлены ({changes_text})")
 
-    @dp.message(Command("tourstart"))
+    @dp.message(Command(commands=["tourstart", "tour_start"]))
     async def tourstart(message: types.Message):
         if not admin(message):
             return
@@ -404,7 +404,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
         await send_or_update_tournament_message()
         await message.answer("Турнир запущен")
 
-    @dp.message(Command("tourend"))
+    @dp.message(Command(commands=["tourend", "tour_end"]))
     async def tourend(message: types.Message):
         if not admin(message):
             return
