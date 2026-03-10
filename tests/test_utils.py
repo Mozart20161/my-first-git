@@ -1,6 +1,6 @@
 import unittest
 
-from football_bot.utils import parse_int_arg, parse_float_arg, validate_date, validate_time
+from football_bot.utils import format_lineups, parse_int_arg, parse_float_arg, validate_date, validate_time
 
 
 class UtilsTests(unittest.TestCase):
@@ -13,6 +13,13 @@ class UtilsTests(unittest.TestCase):
         self.assertEqual(parse_float_arg('/setrating Ivan 7.3'), ('Ivan', 7.3))
         self.assertEqual(parse_float_arg('/setrating Ivan 7,3'), ('Ivan', 7.3))
         self.assertIsNone(parse_float_arg('/setrating Ivan abc'))
+
+
+    def test_format_lineups(self):
+        text = format_lineups({"красные": ["Ivan", "Petr"], "белые": ["Oleg"]})
+        self.assertIn("Красные:", text)
+        self.assertIn("- Ivan", text)
+        self.assertIn("Белые:", text)
 
     def test_date_time_validation(self):
         self.assertTrue(validate_date('10.02'))

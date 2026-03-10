@@ -38,3 +38,12 @@ def validate_time(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def format_lineups(teams: dict[str, list[str]]) -> str:
+    lines: list[str] = []
+    for team_name, players in teams.items():
+        title = team_name.capitalize()
+        player_list = "\n".join(f"- {name}" for name in players) if players else "- —"
+        lines.append(f"{title}:\n{player_list}")
+    return "\n\n".join(lines)
