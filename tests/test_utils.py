@@ -1,6 +1,17 @@
 import unittest
 
-from football_bot.utils import parse_int_arg, parse_float_arg, validate_date, validate_time
+from football_bot.utils import (
+    balance_two_teams,
+    format_lineups,
+    apply_three_team_round,
+    get_three_team_rating_deltas,
+    get_two_team_rating_delta,
+    init_three_team_tournament,
+    parse_float_arg,
+    parse_int_arg,
+    validate_date,
+    validate_time,
+)
 
 
 class UtilsTests(unittest.TestCase):
@@ -13,6 +24,51 @@ class UtilsTests(unittest.TestCase):
         self.assertEqual(parse_float_arg('/setrating Ivan 7.3'), ('Ivan', 7.3))
         self.assertEqual(parse_float_arg('/setrating Ivan 7,3'), ('Ivan', 7.3))
         self.assertIsNone(parse_float_arg('/setrating Ivan abc'))
+        self.assertEqual(parse_float_arg('/setrating Andrew Shumilov 6.1'), ('Andrew Shumilov', 6.1))
+
+    def test_balance_two_teams_respects_core(self):
+        names = ["A", "B", "C", "D", "E", "F", "G", "H"]
+        ratings = {"A": 9, "B": 8, "C": 7, "D": 6, "E": 5, "F": 4, "G": 3, "H": 2}
+        teams = balance_two_teams(names, ratings, {"красные": ["A"], "белые": ["B"]})
+        self.assertIn("A", teams["красные"])
+        self.assertIn("B", teams["белые"])
+        self.assertEqual(len(teams["красные"]), 4)
+        self.assertEqual(len(teams["белые"]), 4)
+
+
+    def test_two_team_delta(self):
+        self.assertEqual(get_two_team_rating_delta(0), 0.0)
+        self.assertEqual(get_two_team_rating_delta(1), 0.035)
+        self.assertEqual(get_two_team_rating_delta(2), 0.07)
+        self.assertEqual(get_two_team_rating_delta(5), 0.1)
+
+    def test_three_team_deltas(self):
+        deltas = get_three_team_rating_deltas({"красные": 6, "белые": 3, "зеленые": 0})
+        self.assertGreater(deltas["красные"], 0)
+        self.assertLess(deltas["зеленые"], 0)
+        self.assertAlmostEqual(sum(deltas.values()), 0.0, places=2)
+
+
+    def test_live_tournament_rotation(self):
+        tour = init_three_team_tournament(["красные", "белые", "зеленые"])
+        self.assertEqual(tour["current_pair"], ["красные", "белые"])
+        apply_three_team_round(tour, "team1")
+        self.assertEqual(tour["current_pair"], ["красные", "зеленые"])
+        self.assertEqual(tour["resting"], "белые")
+
+        # Ничья при двух играх подряд у красных -> красные должны сесть
+        apply_three_team_round(tour, "draw")
+        self.assertEqual(tour["resting"], "красные")
+
+    def test_format_lineups(self):
+        text = format_lineups(
+            {"красные": ["Ivan", "Petr"], "белые": ["Oleg"]},
+            {"Ivan": 7.0, "Petr": 6.5, "Oleg": 8.0},
+        )
+        self.assertIn("Красные (рейтинг: 13.5):", text)
+        self.assertIn("- Ivan", text)
+        self.assertIn("Белые (рейтинг: 8.0):", text)
+        self.assertIn("Разница рейтингов: 5.5", text)
 
     def test_date_time_validation(self):
         self.assertTrue(validate_date('10.02'))
