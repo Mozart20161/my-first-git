@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .config import Config
@@ -28,8 +29,9 @@ def get_main_text(state: BotState, cfg: Config) -> str:
         "⚽️ СБОР НА ФУТБОЛ\n"
         f"📅 {state.match_data['date']} в {state.match_data['time']}\n"
         f"📌 Лимит: {state.match_data['limit']}\n"
-        f"💰 С носа: {price} ₽ | В банк: +{cfg.bank_fee} ₽\n"
+        f"💰 С носа: {price} ₽\n"
         f"🏦 В БАНКЕ: {state.bank_total} ₽\n"
+        "💸 Оплата: +79537904028\n"
         "---------------------------\n"
     )
     for i, p in enumerate(state.players, 1):
@@ -55,6 +57,9 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             try:
                 await bot.edit_message_text(text=text, chat_id=cfg.chat_id, message_id=msg_id, reply_markup=build_kb())
                 return
+            except TelegramBadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    return
             except Exception:
                 pass
         msg = await safe_send(cfg.chat_id, text, reply_markup=build_kb(), message_thread_id=cfg.thread_payments)
@@ -98,12 +103,49 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             if not player:
                 await cb.answer("Сначала запишись", show_alert=True)
                 return
-            if not player.get("paid"):
-                player["paid"] = True
-                state.bank_total += cfg.bank_fee
-                save_state(cfg.data_file, state)
+            if player.get("paid"):
+                await cb.answer("Оплата уже отмечена", show_alert=True)
+                return
+            player["paid"] = True
+            state.bank_total += cfg.bank_fee
+            save_state(cfg.data_file, state)
         await refresh_message()
         await cb.answer("Оплата отмечена")
+
+
+
+    @dp.message(Command("help"))
+    async def help_cmd(message: types.Message):
+        lines = [
+            "Доступные команды:",
+            "/help — показать это сообщение",
+            "/players — список записавшихся",
+            "/lineup — сформировать команды по рейтингам",
+        ]
+        if admin(message):
+            lines.extend([
+                "/setdate <дд.мм>",
+                "/settime <чч:мм>",
+                "/setlimit <число>",
+                "/bank <сумма>",
+                "/setrating <имя> <рейтинг>",
+                "/tour_start — начать турнир (3 команды)",
+                "/tour_end — завершить турнир и обновить рейтинги",
+                "/table — показать таблицу турнира",
+            ])
+        await message.answer("\n".join(lines))
+
+    @dp.message(Command("players"))
+    async def players(message: types.Message):
+        if not state.players:
+            await message.answer("Пока никто не записался")
+            return
+        text = ["Игроки в списке:"]
+        for i, p in enumerate(state.players, 1):
+            paid = "✅" if p.get("paid") else "❌"
+            rating = state.ratings.get(p["name"], 5.0)
+            text.append(f"{i}. {p['name']} | рейтинг: {rating:.1f} | оплата: {paid}")
+        await message.answer("\n".join(text))
 
     @dp.message(Command("setdate"))
     async def setdate(message: types.Message):
@@ -286,6 +328,162 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             save_state(cfg.data_file, state)
         lineup_text = format_lineups(state.last_teams, state.ratings)
         await safe_send(cfg.chat_id, f"Составы готовы\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
+
+    @dp.message(Command("tour_start"))
+    async def tour_start(message: types.Message):
+        if not admin(message):
+            return
+        async with state.lock:
+            teams = state.last_teams or {}
+            names = [n for n in ("красные", "белые", "зеленые") if isinstance(teams.get(n), list)]
+            if len(names) != 3:
+                await message.answer("Сначала сформируй 3 команды через /lineup")
+                return
+            state.tournament_data = {
+                "active": True,
+                "teams": {n: {"points": 0, "wins": 0, "draws": 0, "losses": 0, "matches": 0} for n in names},
+                "current_pair": [names[0], names[1]],
+                "waiting": names[2],
+                "streak": {names[0]: 1, names[1]: 1, names[2]: 0},
+                "message_id": None,
+            }
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+
+    @dp.callback_query(F.data.startswith("tour_win:"))
+    async def tour_win(cb: types.CallbackQuery):
+        if cb.from_user.id != cfg.admin_id:
+            await cb.answer("Только админ", show_alert=True)
+            return
+        winner = cb.data.split(":", 1)[1]
+        async with state.lock:
+            if not _tour_active():
+                await cb.answer("Турнир не запущен", show_alert=True)
+                return
+            if winner not in state.tournament_data.get("current_pair", []):
+                await cb.answer("Победитель должен быть из текущей пары", show_alert=True)
+                return
+            _apply_result(winner)
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await cb.answer("Результат записан")
+
+    @dp.callback_query(F.data == "tour_draw")
+    async def tour_draw(cb: types.CallbackQuery):
+        if cb.from_user.id != cfg.admin_id:
+            await cb.answer("Только админ", show_alert=True)
+            return
+        async with state.lock:
+            if not _tour_active():
+                await cb.answer("Турнир не запущен", show_alert=True)
+                return
+            _apply_result(None)
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await cb.answer("Ничья записана")
+
+    @dp.message(Command("table"))
+    async def table(message: types.Message):
+        await message.answer(_tour_text())
+
+    @dp.message(Command("tour_end"))
+    async def tour_end(message: types.Message):
+        if not admin(message):
+            return
+        async with state.lock:
+            if not _tour_active():
+                await message.answer("Турнир не запущен")
+                return
+            teams = state.tournament_data["teams"]
+            avg = sum(v["points"] for v in teams.values()) / max(len(teams), 1)
+            rosters = state.last_teams or {}
+            for team_name, row in teams.items():
+                delta = 0.2 * (row["points"] - avg)
+                for player_name in rosters.get(team_name, []):
+                    old = state.ratings.get(player_name, 5.0)
+                    state.ratings[player_name] = min(10.0, max(1.0, round(old + delta, 2)))
+            state.tournament_data["active"] = False
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await message.answer("Турнир завершен, рейтинги обновлены")
+
+    @dp.message(Command("tour_start"))
+    async def tour_start(message: types.Message):
+        if not admin(message):
+            return
+        async with state.lock:
+            teams = state.last_teams or {}
+            names = [n for n in ("красные", "белые", "зеленые") if isinstance(teams.get(n), list)]
+            if len(names) != 3:
+                await message.answer("Сначала сформируй 3 команды через /lineup")
+                return
+            state.tournament_data = {
+                "active": True,
+                "teams": {n: {"points": 0, "wins": 0, "draws": 0, "losses": 0, "matches": 0} for n in names},
+                "current_pair": [names[0], names[1]],
+                "waiting": names[2],
+                "streak": {names[0]: 1, names[1]: 1, names[2]: 0},
+                "message_id": None,
+            }
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+
+    @dp.callback_query(F.data.startswith("tour_win:"))
+    async def tour_win(cb: types.CallbackQuery):
+        if cb.from_user.id != cfg.admin_id:
+            await cb.answer("Только админ", show_alert=True)
+            return
+        winner = cb.data.split(":", 1)[1]
+        async with state.lock:
+            if not _tour_active():
+                await cb.answer("Турнир не запущен", show_alert=True)
+                return
+            if winner not in state.tournament_data.get("current_pair", []):
+                await cb.answer("Победитель должен быть из текущей пары", show_alert=True)
+                return
+            _apply_result(winner)
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await cb.answer("Результат записан")
+
+    @dp.callback_query(F.data == "tour_draw")
+    async def tour_draw(cb: types.CallbackQuery):
+        if cb.from_user.id != cfg.admin_id:
+            await cb.answer("Только админ", show_alert=True)
+            return
+        async with state.lock:
+            if not _tour_active():
+                await cb.answer("Турнир не запущен", show_alert=True)
+                return
+            _apply_result(None)
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await cb.answer("Ничья записана")
+
+    @dp.message(Command("table"))
+    async def table(message: types.Message):
+        await message.answer(_tour_text())
+
+    @dp.message(Command("tour_end"))
+    async def tour_end(message: types.Message):
+        if not admin(message):
+            return
+        async with state.lock:
+            if not _tour_active():
+                await message.answer("Турнир не запущен")
+                return
+            teams = state.tournament_data["teams"]
+            avg = sum(v["points"] for v in teams.values()) / max(len(teams), 1)
+            rosters = state.last_teams or {}
+            for team_name, row in teams.items():
+                delta = 0.2 * (row["points"] - avg)
+                for player_name in rosters.get(team_name, []):
+                    old = state.ratings.get(player_name, 5.0)
+                    state.ratings[player_name] = min(10.0, max(1.0, round(old + delta, 2)))
+            state.tournament_data["active"] = False
+            save_state(cfg.data_file, state)
+        await _render_tour_message()
+        await message.answer("Турнир завершен, рейтинги обновлены")
 
     async def create_next_match():
         async with state.lock:
