@@ -16,8 +16,6 @@ from .utils import (
     format_lineups,
     get_three_team_rating_deltas,
     get_two_team_rating_delta,
-    init_three_team_tournament,
-    apply_three_team_round,
     parse_float_arg,
     parse_int_arg,
     validate_date,
@@ -81,6 +79,47 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
 
     def admin(message: types.Message) -> bool:
         return message.from_user.id == cfg.admin_id
+
+    def _player_rating_key(player_id: int | None) -> str | None:
+        if isinstance(player_id, int):
+            return f"id:{player_id}"
+        return None
+
+    def _find_player_by_name(name: str) -> dict | None:
+        for p in state.players:
+            if isinstance(p.get("name"), str) and p["name"].lower() == name.lower():
+                return p
+        return None
+
+    def _get_rating_by_player(player: dict) -> float:
+        key = _player_rating_key(player.get("id"))
+        if key and key in state.ratings:
+            return float(state.ratings[key])
+        legacy_name = player.get("name")
+        if isinstance(legacy_name, str) and legacy_name in state.ratings:
+            return float(state.ratings[legacy_name])
+        return 5.0
+
+    def _set_rating_for_player(player: dict, value: float) -> None:
+        key = _player_rating_key(player.get("id"))
+        if key:
+            state.ratings[key] = value
+        legacy_name = player.get("name")
+        if isinstance(legacy_name, str) and legacy_name in state.ratings:
+            state.ratings[legacy_name] = value
+
+    def _get_rating_by_name(name: str) -> float:
+        player = _find_player_by_name(name)
+        if player:
+            return _get_rating_by_player(player)
+        return float(state.ratings.get(name, 5.0))
+
+    def _set_rating_by_name(name: str, value: float) -> None:
+        player = _find_player_by_name(name)
+        if player:
+            _set_rating_for_player(player, value)
+            return
+        state.ratings[name] = value
 
     def _tour_active() -> bool:
         return bool(state.tournament_data.get("active"))
@@ -187,9 +226,35 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
     @dp.callback_query(F.data == "join")
     async def join(cb: types.CallbackQuery):
         async with state.lock:
-            if any(p["id"] == cb.from_user.id for p in state.players):
+            existing = next((p for p in state.players if p["id"] == cb.from_user.id), None)
+            if existing:
+                if existing.get("name") != cb.from_user.full_name:
+                    existing["name"] = cb.from_user.full_name
+                    existing["guest"] = False
+                    save_state(cfg.data_file, state)
                 await cb.answer("Ты уже в списке", show_alert=True)
                 return
+
+            manual = next(
+                (
+                    p for p in state.players
+                    if p.get("guest") and isinstance(p.get("name"), str) and p["name"].lower() == cb.from_user.full_name.lower()
+                ),
+                None,
+            )
+            if manual:
+                old_key = _player_rating_key(manual.get("id"))
+                new_key = _player_rating_key(cb.from_user.id)
+                if old_key and old_key in state.ratings and new_key and new_key not in state.ratings:
+                    state.ratings[new_key] = float(state.ratings[old_key])
+                manual["id"] = cb.from_user.id
+                manual["name"] = cb.from_user.full_name
+                manual["guest"] = False
+                save_state(cfg.data_file, state)
+                await refresh_message()
+                await cb.answer("Готово")
+                return
+
             if len(state.players) >= state.match_data["limit"]:
                 await cb.answer("Лимит игроков уже достигнут", show_alert=True)
                 return
@@ -254,7 +319,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
         text = ["Игроки в списке:"]
         for i, p in enumerate(state.players, 1):
             paid = "✅" if p.get("paid") else "❌"
-            rating = state.ratings.get(p["name"], 5.0)
+            rating = _get_rating_by_player(p)
             text.append(f"{i}. {p['name']} | рейтинг: {rating:.1f} | оплата: {paid}")
         await message.answer("\n".join(text))
 
@@ -363,10 +428,6 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             save_state(cfg.data_file, state)
         await refresh_message()
 
-    @dp.message(Command("help"))
-    async def help_cmd(message: types.Message):
-        await message.answer(help_text(admin(message)))
-
     @dp.message(Command("setrating"))
     async def setrating(message: types.Message):
         if not admin(message):
@@ -377,7 +438,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             return
         name, value = parsed
         async with state.lock:
-            state.ratings[name] = value
+            _set_rating_by_name(name, value)
             save_state(cfg.data_file, state)
         await message.answer("OK")
 
@@ -410,11 +471,11 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
 
         async with state.lock:
             for player in state.last_teams[winner]:
-                old = state.ratings.get(player, 5.0)
-                state.ratings[player] = round(clamp_rating(old + delta), 2)
+                old = _get_rating_by_name(player)
+                _set_rating_by_name(player, round(clamp_rating(old + delta), 2))
             for player in state.last_teams[loser]:
-                old = state.ratings.get(player, 5.0)
-                state.ratings[player] = round(clamp_rating(old - delta), 2)
+                old = _get_rating_by_name(player)
+                _set_rating_by_name(player, round(clamp_rating(old - delta), 2))
 
             history = state.tournament_data.setdefault("rating_history", [])
             history.append({
@@ -452,8 +513,8 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             for team_name, players in state.last_teams.items():
                 team_delta = deltas.get(team_name, 0.0)
                 for player in players:
-                    old = state.ratings.get(player, 5.0)
-                    state.ratings[player] = round(clamp_rating(old + team_delta), 2)
+                    old = _get_rating_by_name(player)
+                    _set_rating_by_name(player, round(clamp_rating(old + team_delta), 2))
 
             history = state.tournament_data.setdefault("rating_history", [])
             history.append({
@@ -465,98 +526,6 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
 
         changes_text = ", ".join(f"{team}: {delta:+.2f}" for team, delta in deltas.items())
         await message.answer(f"Турнирные рейтинги обновлены ({changes_text})")
-
-    @dp.message(Command(commands=["tourstart", "tour_start"]))
-    async def tourstart(message: types.Message):
-        if not admin(message):
-            return
-        if not state.last_teams or set(state.last_teams.keys()) != {"красные", "белые", "зеленые"}:
-            await message.answer("Сначала сформируй 3 команды через /lineup")
-            return
-
-        async with state.lock:
-            teams = list(state.last_teams.keys())
-            state.tournament_data["live_tournament"] = init_three_team_tournament(teams)
-            save_state(cfg.data_file, state)
-
-        await send_or_update_tournament_message()
-        await message.answer("Турнир запущен")
-
-    @dp.message(Command(commands=["tourend", "tour_end"]))
-    async def tourend(message: types.Message):
-        if not admin(message):
-            return
-        tournament = state.tournament_data.get("live_tournament")
-        if not isinstance(tournament, dict) or not tournament.get("active"):
-            await message.answer("Активного турнира нет")
-            return
-
-        points = {team: tournament["table"][team]["pts"] for team in tournament.get("teams", [])}
-        deltas = get_three_team_rating_deltas(points)
-
-        async with state.lock:
-            for team_name, players in state.last_teams.items():
-                team_delta = deltas.get(team_name, 0.0)
-                for player in players:
-                    old = state.ratings.get(player, 5.0)
-                    state.ratings[player] = round(clamp_rating(old + team_delta), 2)
-
-            history = state.tournament_data.setdefault("rating_history", [])
-            history.append({
-                "mode": "3teams_live",
-                "points": points,
-                "deltas": deltas,
-                "rounds": tournament.get("rounds", []),
-            })
-            state.tournament_data.pop("live_tournament", None)
-            save_state(cfg.data_file, state)
-
-        changes_text = ", ".join(f"{team}: {delta:+.2f}" for team, delta in deltas.items())
-        await message.answer(f"Турнир завершен. Рейтинги обновлены ({changes_text})")
-
-    @dp.callback_query(F.data.startswith("tour:"))
-    async def tournament_round(cb: types.CallbackQuery):
-        if cb.from_user.id != cfg.admin_id:
-            await cb.answer("Только администратор", show_alert=True)
-            return
-        action = (cb.data or "").split(":", maxsplit=1)[1]
-        if action not in {"team1", "team2", "draw"}:
-            await cb.answer("Неизвестное действие", show_alert=True)
-            return
-
-        async with state.lock:
-            tournament = state.tournament_data.get("live_tournament")
-            if not isinstance(tournament, dict) or not tournament.get("active"):
-                await cb.answer("Турнир не запущен", show_alert=True)
-                return
-            apply_three_team_round(tournament, action)
-            save_state(cfg.data_file, state)
-
-        await send_or_update_tournament_message()
-        await cb.answer("Результат учтен")
-
-    @dp.message(Command("addplayer"))
-    async def addplayer(message: types.Message):
-        if not admin(message):
-            return
-        parts = (message.text or "").split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].strip():
-            await message.answer("Использование: /addplayer <имя игрока>")
-            return
-        name = parts[1].strip()
-
-        async with state.lock:
-            if any(p["name"].lower() == name.lower() for p in state.players):
-                await message.answer("Игрок уже в списке")
-                return
-            if len(state.players) >= state.match_data["limit"]:
-                await message.answer("Лимит игроков уже достигнут")
-                return
-            state.players.append({"id": next_manual_player_id(), "name": name, "paid": False, "guest": True})
-            save_state(cfg.data_file, state)
-
-        await refresh_message()
-        await message.answer(f"Добавил игрока: {name}")
 
     @dp.message(Command("setcore"))
     async def setcore(message: types.Message):
@@ -622,7 +591,8 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             state.last_teams[team1][i1], state.last_teams[team2][i2] = state.last_teams[team2][i2], state.last_teams[team1][i1]
             save_state(cfg.data_file, state)
 
-        lineup_text = format_lineups(state.last_teams, state.ratings)
+        lineup_ratings = {p["name"]: _get_rating_by_player(p) for p in state.players}
+        lineup_text = format_lineups(state.last_teams, lineup_ratings)
         await safe_send(cfg.chat_id, f"Составы обновлены\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
 
     @dp.message(Command("lineup"))
@@ -633,7 +603,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
         if total < 8:
             await message.answer("Недостаточно игроков")
             return
-        sorted_players = sorted(state.players, key=lambda x: state.ratings.get(x["name"], 5.0), reverse=True)
+        sorted_players = sorted(state.players, key=_get_rating_by_player, reverse=True)
         names = [p["name"] for p in sorted_players]
         if total >= cfg.min_for_three_teams:
             sizes = (5, 5, 4) if total == 14 else (5, 5, 5)
@@ -643,17 +613,18 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
                 available = [i for i in range(3) if len(teams[i]) < sizes[i]]
                 target = min(available, key=lambda i: sums[i])
                 teams[target].append(player["name"])
-                sums[target] += state.ratings.get(player["name"], 5.0)
+                sums[target] += _get_rating_by_player(player)
             state.last_teams = {"красные": teams[0], "белые": teams[1], "зеленые": teams[2]}
         else:
             pinned = state.tournament_data.get("pinned_teams") if isinstance(state.tournament_data.get("pinned_teams"), dict) else None
             state.last_teams = balance_two_teams(names, state.ratings, pinned)
         async with state.lock:
             save_state(cfg.data_file, state)
-        lineup_text = format_lineups(state.last_teams, state.ratings)
+        lineup_ratings = {p["name"]: _get_rating_by_player(p) for p in state.players}
+        lineup_text = format_lineups(state.last_teams, lineup_ratings)
         await safe_send(cfg.chat_id, f"Составы готовы\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
 
-    @dp.message(Command("tour_start"))
+    @dp.message(Command(commands=["tourstart", "tour_start"]))
     async def tour_start(message: types.Message):
         if not admin(message):
             return
@@ -669,6 +640,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
                 "current_pair": [names[0], names[1]],
                 "waiting": names[2],
                 "streak": {names[0]: 1, names[1]: 1, names[2]: 0},
+                "roster_snapshot": {name: list(teams.get(name, [])) for name in names},
                 "message_id": None,
             }
             save_state(cfg.data_file, state)
@@ -710,7 +682,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
     async def table(message: types.Message):
         await message.answer(_tour_text())
 
-    @dp.message(Command("tour_end"))
+    @dp.message(Command(commands=["tourend", "tour_end"]))
     async def tour_end(message: types.Message):
         if not admin(message):
             return
@@ -720,90 +692,12 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
                 return
             teams = state.tournament_data["teams"]
             avg = sum(v["points"] for v in teams.values()) / max(len(teams), 1)
-            rosters = state.last_teams or {}
+            rosters = state.tournament_data.get("roster_snapshot") if isinstance(state.tournament_data.get("roster_snapshot"), dict) else {}
             for team_name, row in teams.items():
                 delta = 0.2 * (row["points"] - avg)
                 for player_name in rosters.get(team_name, []):
-                    old = state.ratings.get(player_name, 5.0)
-                    state.ratings[player_name] = min(10.0, max(1.0, round(old + delta, 2)))
-            state.tournament_data["active"] = False
-            save_state(cfg.data_file, state)
-        await _render_tour_message()
-        await message.answer("Турнир завершен, рейтинги обновлены")
-
-    @dp.message(Command("tour_start"))
-    async def tour_start(message: types.Message):
-        if not admin(message):
-            return
-        async with state.lock:
-            teams = state.last_teams or {}
-            names = [n for n in ("красные", "белые", "зеленые") if isinstance(teams.get(n), list)]
-            if len(names) != 3:
-                await message.answer("Сначала сформируй 3 команды через /lineup")
-                return
-            state.tournament_data = {
-                "active": True,
-                "teams": {n: {"points": 0, "wins": 0, "draws": 0, "losses": 0, "matches": 0} for n in names},
-                "current_pair": [names[0], names[1]],
-                "waiting": names[2],
-                "streak": {names[0]: 1, names[1]: 1, names[2]: 0},
-                "message_id": None,
-            }
-            save_state(cfg.data_file, state)
-        await _render_tour_message()
-
-    @dp.callback_query(F.data.startswith("tour_win:"))
-    async def tour_win(cb: types.CallbackQuery):
-        if cb.from_user.id != cfg.admin_id:
-            await cb.answer("Только админ", show_alert=True)
-            return
-        winner = cb.data.split(":", 1)[1]
-        async with state.lock:
-            if not _tour_active():
-                await cb.answer("Турнир не запущен", show_alert=True)
-                return
-            if winner not in state.tournament_data.get("current_pair", []):
-                await cb.answer("Победитель должен быть из текущей пары", show_alert=True)
-                return
-            _apply_result(winner)
-            save_state(cfg.data_file, state)
-        await _render_tour_message()
-        await cb.answer("Результат записан")
-
-    @dp.callback_query(F.data == "tour_draw")
-    async def tour_draw(cb: types.CallbackQuery):
-        if cb.from_user.id != cfg.admin_id:
-            await cb.answer("Только админ", show_alert=True)
-            return
-        async with state.lock:
-            if not _tour_active():
-                await cb.answer("Турнир не запущен", show_alert=True)
-                return
-            _apply_result(None)
-            save_state(cfg.data_file, state)
-        await _render_tour_message()
-        await cb.answer("Ничья записана")
-
-    @dp.message(Command("table"))
-    async def table(message: types.Message):
-        await message.answer(_tour_text())
-
-    @dp.message(Command("tour_end"))
-    async def tour_end(message: types.Message):
-        if not admin(message):
-            return
-        async with state.lock:
-            if not _tour_active():
-                await message.answer("Турнир не запущен")
-                return
-            teams = state.tournament_data["teams"]
-            avg = sum(v["points"] for v in teams.values()) / max(len(teams), 1)
-            rosters = state.last_teams or {}
-            for team_name, row in teams.items():
-                delta = 0.2 * (row["points"] - avg)
-                for player_name in rosters.get(team_name, []):
-                    old = state.ratings.get(player_name, 5.0)
-                    state.ratings[player_name] = min(10.0, max(1.0, round(old + delta, 2)))
+                    old = _get_rating_by_name(player_name)
+                    _set_rating_by_name(player_name, min(10.0, max(1.0, round(old + delta, 2))))
             state.tournament_data["active"] = False
             save_state(cfg.data_file, state)
         await _render_tour_message()
