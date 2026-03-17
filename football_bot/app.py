@@ -80,24 +80,46 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
     def admin(message: types.Message) -> bool:
         return message.from_user.id == cfg.admin_id
 
-    def _rating_key(player_id: int) -> str:
-        return f"id:{player_id}"
-
-    def _get_rating(player: dict) -> float:
-        player_id = player.get("id")
-        name = player.get("name")
+    def _player_rating_key(player_id: int | None) -> str | None:
         if isinstance(player_id, int):
-            keys = (_rating_key(player_id), str(player_id))
-            for key in keys:
-                value = state.ratings.get(key)
-                if isinstance(value, (int, float)):
-                    return float(value)
-            if isinstance(name, str):
-                legacy = state.ratings.get(name)
-                if isinstance(legacy, (int, float)):
-                    state.ratings[_rating_key(player_id)] = float(legacy)
-                    return float(legacy)
-        return float(state.ratings.get(name, 5.0)) if isinstance(name, str) else 5.0
+            return f"id:{player_id}"
+        return None
+
+    def _find_player_by_name(name: str) -> dict | None:
+        for p in state.players:
+            if isinstance(p.get("name"), str) and p["name"].lower() == name.lower():
+                return p
+        return None
+
+    def _get_rating_by_player(player: dict) -> float:
+        key = _player_rating_key(player.get("id"))
+        if key and key in state.ratings:
+            return float(state.ratings[key])
+        legacy_name = player.get("name")
+        if isinstance(legacy_name, str) and legacy_name in state.ratings:
+            return float(state.ratings[legacy_name])
+        return 5.0
+
+    def _set_rating_for_player(player: dict, value: float) -> None:
+        key = _player_rating_key(player.get("id"))
+        if key:
+            state.ratings[key] = value
+        legacy_name = player.get("name")
+        if isinstance(legacy_name, str) and legacy_name in state.ratings:
+            state.ratings[legacy_name] = value
+
+    def _get_rating_by_name(name: str) -> float:
+        player = _find_player_by_name(name)
+        if player:
+            return _get_rating_by_player(player)
+        return float(state.ratings.get(name, 5.0))
+
+    def _set_rating_by_name(name: str, value: float) -> None:
+        player = _find_player_by_name(name)
+        if player:
+            _set_rating_for_player(player, value)
+            return
+        state.ratings[name] = value
 
     def _tour_active() -> bool:
         return bool(state.tournament_data.get("active"))
@@ -204,26 +226,35 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
     @dp.callback_query(F.data == "join")
     async def join(cb: types.CallbackQuery):
         async with state.lock:
-            if any(p["id"] == cb.from_user.id for p in state.players):
+            existing = next((p for p in state.players if p["id"] == cb.from_user.id), None)
+            if existing:
+                if existing.get("name") != cb.from_user.full_name:
+                    existing["name"] = cb.from_user.full_name
+                    existing["guest"] = False
+                    save_state(cfg.data_file, state)
                 await cb.answer("Ты уже в списке", show_alert=True)
                 return
-            guest = next(
+
+            manual = next(
                 (
-                    p
-                    for p in state.players
-                    if p.get("guest") and isinstance(p.get("id"), int) and p["id"] < 0 and p["name"].lower() == cb.from_user.full_name.lower()
+                    p for p in state.players
+                    if p.get("guest") and isinstance(p.get("name"), str) and p["name"].lower() == cb.from_user.full_name.lower()
                 ),
                 None,
             )
-            if guest:
-                old_guest_id = guest["id"]
-                guest["id"] = cb.from_user.id
-                guest["guest"] = False
-                guest["name"] = cb.from_user.full_name
-                old_key = _rating_key(old_guest_id)
-                new_key = _rating_key(cb.from_user.id)
-                if old_key in state.ratings and new_key not in state.ratings:
+            if manual:
+                old_key = _player_rating_key(manual.get("id"))
+                new_key = _player_rating_key(cb.from_user.id)
+                if old_key and old_key in state.ratings and new_key and new_key not in state.ratings:
                     state.ratings[new_key] = float(state.ratings[old_key])
+                manual["id"] = cb.from_user.id
+                manual["name"] = cb.from_user.full_name
+                manual["guest"] = False
+                save_state(cfg.data_file, state)
+                await refresh_message()
+                await cb.answer("Готово")
+                return
+
             if len(state.players) >= state.match_data["limit"]:
                 await cb.answer("Лимит игроков уже достигнут", show_alert=True)
                 return
@@ -289,7 +320,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
         text = ["Игроки в списке:"]
         for i, p in enumerate(state.players, 1):
             paid = "✅" if p.get("paid") else "❌"
-            rating = _get_rating(p)
+            rating = _get_rating_by_player(p)
             text.append(f"{i}. {p['name']} | рейтинг: {rating:.1f} | оплата: {paid}")
         await message.answer("\n".join(text))
 
@@ -408,11 +439,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             return
         name, value = parsed
         async with state.lock:
-            player = next((p for p in state.players if p["name"].lower() == name.lower()), None)
-            if player and isinstance(player.get("id"), int):
-                state.ratings[_rating_key(player["id"])] = value
-            else:
-                state.ratings[name] = value
+            _set_rating_by_name(name, value)
             save_state(cfg.data_file, state)
         await message.answer("OK")
 
@@ -445,11 +472,11 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
 
         async with state.lock:
             for player in state.last_teams[winner]:
-                old = state.ratings.get(player, 5.0)
-                state.ratings[player] = round(clamp_rating(old + delta), 2)
+                old = _get_rating_by_name(player)
+                _set_rating_by_name(player, round(clamp_rating(old + delta), 2))
             for player in state.last_teams[loser]:
-                old = state.ratings.get(player, 5.0)
-                state.ratings[player] = round(clamp_rating(old - delta), 2)
+                old = _get_rating_by_name(player)
+                _set_rating_by_name(player, round(clamp_rating(old - delta), 2))
 
             history = state.tournament_data.setdefault("rating_history", [])
             history.append({
@@ -487,8 +514,8 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             for team_name, players in state.last_teams.items():
                 team_delta = deltas.get(team_name, 0.0)
                 for player in players:
-                    old = state.ratings.get(player, 5.0)
-                    state.ratings[player] = round(clamp_rating(old + team_delta), 2)
+                    old = _get_rating_by_name(player)
+                    _set_rating_by_name(player, round(clamp_rating(old + team_delta), 2))
 
             history = state.tournament_data.setdefault("rating_history", [])
             history.append({
@@ -565,7 +592,8 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             state.last_teams[team1][i1], state.last_teams[team2][i2] = state.last_teams[team2][i2], state.last_teams[team1][i1]
             save_state(cfg.data_file, state)
 
-        lineup_text = format_lineups(state.last_teams, state.ratings)
+        lineup_ratings = {p["name"]: _get_rating_by_player(p) for p in state.players}
+        lineup_text = format_lineups(state.last_teams, lineup_ratings)
         await safe_send(cfg.chat_id, f"Составы обновлены\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
 
     @dp.message(Command("lineup"))
@@ -576,7 +604,7 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
         if total < 8:
             await message.answer("Недостаточно игроков")
             return
-        sorted_players = sorted(state.players, key=_get_rating, reverse=True)
+        sorted_players = sorted(state.players, key=_get_rating_by_player, reverse=True)
         names = [p["name"] for p in sorted_players]
         if total >= cfg.min_for_three_teams:
             sizes = (5, 5, 4) if total == 14 else (5, 5, 5)
@@ -586,14 +614,15 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
                 available = [i for i in range(3) if len(teams[i]) < sizes[i]]
                 target = min(available, key=lambda i: sums[i])
                 teams[target].append(player["name"])
-                sums[target] += _get_rating(player)
+                sums[target] += _get_rating_by_player(player)
             state.last_teams = {"красные": teams[0], "белые": teams[1], "зеленые": teams[2]}
         else:
             pinned = state.tournament_data.get("pinned_teams") if isinstance(state.tournament_data.get("pinned_teams"), dict) else None
             state.last_teams = balance_two_teams(names, state.ratings, pinned)
         async with state.lock:
             save_state(cfg.data_file, state)
-        lineup_text = format_lineups(state.last_teams, state.ratings)
+        lineup_ratings = {p["name"]: _get_rating_by_player(p) for p in state.players}
+        lineup_text = format_lineups(state.last_teams, lineup_ratings)
         await safe_send(cfg.chat_id, f"Составы готовы\n\n{lineup_text}", message_thread_id=cfg.thread_teams)
 
     @dp.message(Command(commands=["tourstart", "tour_start"]))
@@ -668,8 +697,8 @@ def create_app(cfg: Config, state: BotState) -> tuple[Bot, Dispatcher, AsyncIOSc
             for team_name, row in teams.items():
                 delta = 0.2 * (row["points"] - avg)
                 for player_name in rosters.get(team_name, []):
-                    old = state.ratings.get(player_name, 5.0)
-                    state.ratings[player_name] = min(10.0, max(1.0, round(old + delta, 2)))
+                    old = _get_rating_by_name(player_name)
+                    _set_rating_by_name(player_name, min(10.0, max(1.0, round(old + delta, 2))))
             state.tournament_data["active"] = False
             save_state(cfg.data_file, state)
         await _render_tour_message()
